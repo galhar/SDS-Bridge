@@ -6,7 +6,9 @@ import imageio
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torchvision
 from guidance import Guidance, GuidanceConfig
+from torchvision.io import read_image
 from tqdm import tqdm
 
 device = torch.device("cuda")
@@ -45,13 +47,30 @@ args = parser.parse_args()
 
 init_image_fn = args.init_image_fn
 
+
+def initialize_image(img_path, size=256):
+    """
+    returns a video of dimensions [num_frames, h, w, 3]
+    """
+    img = read_image(img_path) / 255
+    resized_img = torchvision.transforms.functional.resize(img, size=[size, size])
+    resized_img = resized_img.permute(1, 2, 0)  # [3, h, w] -> [h,w,3]
+    return resized_img
+
+
 guidance = Guidance(
     GuidanceConfig(sd_pretrained_model_or_path="stabilityai/stable-diffusion-2-1-base"),
     use_lora=(args.mode == "vsd"),
 )
 
-if init_image_fn is not None:
-    reference = torch.tensor(plt.imread(init_image_fn))[..., :3]
+if True:  # nit_image_fn is not None:
+    # reference = torch.tensor(plt.imread(init_image_fn))[..., :3]
+    # reference = torch.normal(mean=0, std=1, size=(512, 512, 3), dtype=torch.float16)
+    # reference = torch.full((512, 512, 3), 0, dtype=torch.float16)
+    reference = initialize_image(
+        "../../datasets/experiments/video_models_experiments/dolphin_white_bg-removebg-preview.jpg",
+        512,
+    )
     reference = reference.permute(2, 0, 1)[None, ...]
     reference = reference.to(guidance.unet.device)
 
