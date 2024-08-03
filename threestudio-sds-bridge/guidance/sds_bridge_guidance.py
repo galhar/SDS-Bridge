@@ -1,19 +1,18 @@
+import math
 from dataclasses import dataclass, field
 
-import math
+import threestudio
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from diffusers import DDIMScheduler, StableDiffusionPipeline
 from diffusers.utils.import_utils import is_xformers_available
-from tqdm import tqdm
-
-import threestudio
 from threestudio.models.prompt_processors.base import PromptProcessorOutput
 from threestudio.utils.base import BaseObject
 from threestudio.utils.misc import C, cleanup, parse_version
 from threestudio.utils.ops import perpendicular_component
 from threestudio.utils.typing import *
+from tqdm import tqdm
 
 
 @threestudio.register("stable-diffusion-sds-bridge-guidance")
@@ -25,16 +24,20 @@ class SDSBridgeGuidance(BaseObject):
         enable_sequential_cpu_offload: bool = False
         enable_attention_slicing: bool = False
         enable_channels_last_format: bool = False
-        grad_clip: Optional[
-            Any
-        ] = None  # field(default_factory=lambda: [0, 2.0, 8.0, 1000])
+        grad_clip: Optional[Any] = (
+            None  # field(default_factory=lambda: [0, 2.0, 8.0, 1000])
+        )
         half_precision_weights: bool = True
 
         min_step_percent: float = 0.02
         max_step_percent: float = 0.98
-        sqrt_anneal: bool = False  # sqrt anneal proposed in HiFA: https://hifa-team.github.io/HiFA-site/
+        sqrt_anneal: bool = (
+            False  # sqrt anneal proposed in HiFA: https://hifa-team.github.io/HiFA-site/
+        )
         trainer_max_steps: int = 25000
-        use_img_loss: bool = False  # image-space SDS proposed in HiFA: https://hifa-team.github.io/HiFA-site/
+        use_img_loss: bool = (
+            False  # image-space SDS proposed in HiFA: https://hifa-team.github.io/HiFA-site/
+        )
 
         var_red: bool = True
         weighting_strategy: str = "sds"
@@ -50,10 +53,9 @@ class SDSBridgeGuidance(BaseObject):
         """Configs for SDS-Bridges"""
         num_inference_steps: int = 500
         guidance_scale: float = 100.0
-        stage_one_weight: float = 1.
-        stage_two_weight: float = 100.
+        stage_one_weight: float = 1.0
+        stage_two_weight: float = 100.0
         stage_two_start_step: int = 20000
-
 
     cfg: Config
 
@@ -120,7 +122,6 @@ class SDSBridgeGuidance(BaseObject):
             torch_dtype=self.weights_dtype,
         )
 
-
         self.num_train_timesteps = self.scheduler.config.num_train_timesteps
         self.set_min_max_steps()  # set to default value
 
@@ -162,7 +163,6 @@ class SDSBridgeGuidance(BaseObject):
         latents = posterior.sample() * self.vae.config.scaling_factor
         return latents.to(input_dtype)
 
-    
     @torch.cuda.amp.autocast(enabled=False)
     def decode_latents(
         self,
@@ -196,7 +196,9 @@ class SDSBridgeGuidance(BaseObject):
         text_embeddings_all = prompt_utils.get_text_embeddings(
             elevation, azimuth, camera_distances, self.cfg.view_dependent_prompting
         )
-        src_text_embeddings, tgt_text_embeddings, base_text_embeddings = text_embeddings_all
+        src_text_embeddings, tgt_text_embeddings, base_text_embeddings = (
+            text_embeddings_all
+        )
         src_text_embedding = src_text_embeddings[:1]
         tgt_text_embedding = tgt_text_embeddings[:1]
         base_text_embedding = base_text_embeddings[:1]
@@ -212,17 +214,20 @@ class SDSBridgeGuidance(BaseObject):
             latents_noisy = self.scheduler.add_noise(latents, noise, t)
 
             latent_model_input = torch.cat([latents_noisy] * 2, dim=0)
-            noise_pred = self.forward_unet(latent_model_input, torch.cat([t] * 2).to(device), text_embeddings)
+            noise_pred = self.forward_unet(
+                latent_model_input, torch.cat([t] * 2).to(device), text_embeddings
+            )
             noise_pred_text_src, noise_pred_text_tgt = noise_pred.chunk(3)
             if self.phase_id == 1:
                 w = (1 - self.alphas[t]).view(-1, 1, 1, 1)
-                noise_pred_sds = noise_pred_text_src + self.cfg.guidance_scale * (noise_pred_text_tgt - noise_pred_text_src)
+                noise_pred_sds = noise_pred_text_src + self.cfg.guidance_scale * (
+                    noise_pred_text_tgt - noise_pred_text_src
+                )
                 noise_pred = self.cfg.stage_one_weight * w * noise_pred_sds
                 noise = self.cfg.stage_one_weight * w * noise
             elif self.phase_id == 2:
                 noise_pred = self.cfg.stage_two_weight * noise_pred_text_tgt
                 noise = self.cfg.stage_two_weight * noise_pred_text_src
-
 
         if self.cfg.weighting_strategy == "sds":
             # w(t), sigma_t^2
@@ -267,9 +272,13 @@ class SDSBridgeGuidance(BaseObject):
         beta_t = self.scheduler.betas.to(device)[t][:, None, None, None]
         alpha_t = self.scheduler.alphas.to(device)[t][:, None, None, None]
         alpha_bar_t = self.scheduler.alphas_cumprod.to(device)[t][:, None, None, None]
-        alpha_bar_t_prev = self.scheduler.alphas_cumprod.to(device)[t_prev][:, None, None, None]
+        alpha_bar_t_prev = self.scheduler.alphas_cumprod.to(device)[t_prev][
+            :, None, None, None
+        ]
 
-        pred_x0 = (xt - torch.sqrt(1 - alpha_bar_t) * noise_pred) / torch.sqrt(alpha_bar_t)
+        pred_x0 = (xt - torch.sqrt(1 - alpha_bar_t) * noise_pred) / torch.sqrt(
+            alpha_bar_t
+        )
         c0 = torch.sqrt(alpha_bar_t_prev) * beta_t / (1 - alpha_bar_t)
         c1 = torch.sqrt(alpha_t) * (1 - alpha_bar_t_prev) / (1 - alpha_bar_t)
 

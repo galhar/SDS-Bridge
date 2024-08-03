@@ -1,4 +1,5 @@
 import argparse
+import datetime
 import os
 import random
 
@@ -36,7 +37,7 @@ parser.add_argument(
 )
 parser.add_argument("--init_image_fn", type=str, default=None)
 parser.add_argument(
-    "--mode", type=str, default="bridge", choices=["bridge", "sds", "nfsd", "vsd"]
+    "--mode", type=str, default="sds", choices=["bridge", "sds", "nfsd", "vsd"]
 )
 parser.add_argument("--cfg_scale", type=float, default=40)
 parser.add_argument("--lr", type=float, default=0.01)
@@ -58,15 +59,31 @@ def initialize_image(img_path, size=256):
     return resized_img
 
 
+cur_run_ts = datetime.datetime.now().strftime("%m%d%Y_%H%M%S")
+save_dir = "results/%s_gen/%s_%s_lr%.3f_seed%d_scale%.1f" % (
+    args.mode,
+    cur_run_ts,
+    args.prompt.replace(" ", "_"),
+    args.lr,
+    args.seed,
+    args.cfg_scale,
+)
+os.makedirs(save_dir, exist_ok=True)
+print("Save dir:", save_dir)
+
 guidance = Guidance(
     GuidanceConfig(sd_pretrained_model_or_path="stabilityai/stable-diffusion-2-1-base"),
     use_lora=(args.mode == "vsd"),
+    save_dir=save_dir,
 )
 
-if True:  # nit_image_fn is not None:
+init_from_image = False
+
+if init_from_image:  # nit_image_fn is not None:
     # reference = torch.tensor(plt.imread(init_image_fn))[..., :3]
     # reference = torch.normal(mean=0, std=1, size=(512, 512, 3), dtype=torch.float16)
     # reference = torch.full((512, 512, 3), 0, dtype=torch.float16)
+
     reference = initialize_image(
         "../../datasets/experiments/video_models_experiments/dolphin_white_bg-removebg-preview.jpg",
         512,
@@ -79,16 +96,6 @@ if True:  # nit_image_fn is not None:
 else:
     # Initialize with low-magnitude noise, zeros also works
     im = torch.randn((1, 4, 64, 64), device=guidance.unet.device)
-
-save_dir = "results/%s_gen/%s_lr%.3f_seed%d_scale%.1f" % (
-    args.mode,
-    args.prompt.replace(" ", "_"),
-    args.lr,
-    args.seed,
-    args.cfg_scale,
-)
-os.makedirs(save_dir, exist_ok=True)
-print("Save dir:", save_dir)
 
 seed_everything(args.seed)
 
@@ -170,3 +177,5 @@ for step in tqdm(range(args.n_steps)):
             fps=10,
             codec="libx264",
         )
+        if args.mode == "sds":
+            guidance.log_latents(step)

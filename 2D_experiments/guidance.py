@@ -1,10 +1,12 @@
 import gc
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torchvision
 from diffusers import DDIMScheduler, DiffusionPipeline
 from diffusers.loaders import AttnProcsLayers
 from diffusers.models.attention_processor import LoRAAttnProcessor
@@ -50,8 +52,9 @@ class GuidanceConfig:
 
 
 class Guidance(object):
-    def __init__(self, config: GuidanceConfig, use_lora: bool = False):
+    def __init__(self, config: GuidanceConfig, use_lora: bool = False, save_dir="./"):
         self.config = config
+        self.save_dir = save_dir
         self.device = torch.device(config.device)
 
         self.pipe = DiffusionPipeline.from_pretrained(
@@ -241,11 +244,100 @@ class Guidance(object):
         grad = torch.nan_to_num(grad)
         target = (im - grad).detach()
         loss = 0.5 * F.mse_loss(im, target, reduction=reduction) / batch_size
+
+        self.last_noised_latent_zt = latents_noisy
+        self.last_eps = noise
+        self.last_eps_t = noise_pred
+        self.last_t = t
+
         if return_dict:
             dic = {"loss": loss, "grad": grad, "t": t}
             return dic
         else:
             return loss
+
+    def log_latents(self, step=""):
+        suffix = "_" + str(self.last_t.item()) + ".png"
+
+        original_latents = self.clean_noise_from_latents(
+            self.last_noised_latent_zt, self.last_eps, self.last_t
+        )
+        self.save_latents(
+            original_latents,
+            f"{step}_original_latents{suffix}",
+        )
+
+        generated_latents = self.clean_noise_from_latents(
+            self.last_noised_latent_zt, self.last_eps_t, self.last_t
+        )
+        self.save_latents(
+            generated_latents,
+            f"{step}_generated_latents{suffix}",
+        )
+        self.save_latents(self.last_noised_latent_zt, f"{step}_noisy_latents{suffix}")
+        self.save_latents(
+            self.last_eps_t - self.last_eps, f"{step}_predicted_noise{suffix}"
+        )
+
+        del original_latents
+        del generated_latents
+        torch.cuda.empty_cache()
+
+    def save_latents(self, latents, file_name):
+        latents = latents / self.pipe.vae.config.scaling_factor
+        latent_for_vae_decoder = latents
+        # decoded_frames = self.pipe.vae.decoder(latent_for_vae_decoder)
+        decoded_img = self.pipe.vae.decode(latent_for_vae_decoder).sample
+        # Reshape decoded frames back to the original format if necessary
+        decoded_img = (decoded_img + 1) / 2.0  # Convert back to [0, 1] range
+        decoded_img = decoded_img.detach().cpu().type(torch.float32)  # .numpy()
+        # img = np.clip(decoded_img * 255.0, 0, 255).astype(np.uint8)
+
+        # Save the video
+        save_to_folder = os.path.join(self.save_dir, "debugging_decoded_latents")
+        if not os.path.isdir(save_to_folder):
+            os.mkdir(save_to_folder)
+        torchvision.utils.save_image(
+            decoded_img, os.path.join(save_to_folder, file_name)
+        )
+
+        # Clear for later
+        del latent_for_vae_decoder
+        del latents
+        del decoded_img
+        torch.cuda.empty_cache()
+
+    def clean_noise_from_latents(
+        self,
+        noisy_samples: torch.Tensor,
+        noise: torch.Tensor,
+        timesteps: torch.IntTensor,
+    ) -> torch.Tensor:
+        # Make sure alphas_cumprod and timestep have same device and dtype as original_samples
+        # Move the self.alphas_cumprod to device to avoid redundant CPU to GPU data movement
+        # for the subsequent add_noise calls
+        self.alphas_cumprod = self.pipe.scheduler.alphas_cumprod.to(
+            device=noisy_samples.device
+        )
+        alphas_cumprod = self.alphas_cumprod.to(dtype=noisy_samples.dtype)
+        timesteps = timesteps.to(noisy_samples.device)
+
+        sqrt_alpha_prod = alphas_cumprod[timesteps] ** 0.5
+        sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+        while len(sqrt_alpha_prod.shape) < len(noisy_samples.shape):
+            sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
+
+        sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]) ** 0.5
+        sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+        while len(sqrt_one_minus_alpha_prod.shape) < len(noisy_samples.shape):
+            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
+
+        # diffusoin line: noisy_samples = sqrt_alpha_prod * original_samples + sqrt_one_minus_alpha_prod * noise
+        # so to clean it use:
+        cleaned_samples = (
+            noisy_samples - sqrt_one_minus_alpha_prod * noise
+        ) / sqrt_alpha_prod
+        return cleaned_samples
 
     def bridge_stage_two(
         self,
